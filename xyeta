@@ -1,0 +1,1230 @@
+--=============================================================
+--  Venice  |  Project Delta  v5
+--=============================================================
+if not game:IsLoaded() then game.Loaded:Wait() end
+
+local G = (getgenv and getgenv()) or _G
+if G.VenicePD_Unload then pcall(G.VenicePD_Unload) end
+
+local Players    = game:GetService("Players")
+local RS         = game:GetService("ReplicatedStorage")
+local WS         = game:GetService("Workspace")
+local UIS        = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local Lighting   = game:GetService("Lighting")
+local Tween      = game:GetService("TweenService")
+local Http       = game:GetService("HttpService")
+local CoreGui    = game:GetService("CoreGui")
+
+local LP     = Players.LocalPlayer
+local Camera = WS.CurrentCamera
+
+local conns, insts, draws = {}, {}, {}
+local running = true
+local function track(c) conns[#conns+1] = c return c end
+local function keep(i) insts[#insts+1] = i return i end
+local function draw(d) draws[#draws+1] = d return d end
+
+local function uiRoot()
+    local ok, h = pcall(gethui)
+    if ok and h then return h end
+    return LP:FindFirstChild("PlayerGui") or CoreGui
+end
+
+local old = uiRoot():FindFirstChild("VenicePD")
+if old then old:Destroy() end
+
+local Gui = keep(Instance.new("ScreenGui"))
+Gui.Name = "VenicePD"
+Gui.ResetOnSpawn = false
+Gui.DisplayOrder = 999
+pcall(function() Gui.IgnoreGuiInset = true end)
+Gui.Parent = uiRoot()
+
+--=============================================================
+--  Конфиг
+--=============================================================
+local C = {
+    Silent = true, SilentKey = Enum.KeyCode.E, Bone = "Head",
+    Fov = 240, WallCheck = true, Predict = true, NpcAim = true, Circle = true,
+    AutoShoot = false, ShootDelay = 0.06,
+    Aimbot = false, AimbotKey = Enum.KeyCode.Q, Smooth = 1.0,
+    NoRecoil = false, NoDrop = false, NoDrag = false,
+    P_Players = false, P_Npc = false, P_Body = false, P_Box = false,
+    P_Item = false, P_Exit = true, P_Trap = true, OnlyFilled = true,
+    Box = true, Name = true, Dist = true, Tracer = false,
+    DistPlayer = 1200, DistNpc = 800, DistBox = 300,
+    Speed = false, SpeedVal = 20, InfJump = false, Third = false,
+    Bright = false, NoFog = false, NoGrass = false, NoVisor = false, NoFlash = false,
+    AutoLoot = false, LootDelay = 0.08, LootMin = 0,
+    MenuKey = Enum.KeyCode.RightShift,
+}
+
+local FILE = "VenicePD.json"
+local sync = {}
+
+local function save()
+    if not writefile then return end
+    pcall(function()
+        local t = {}
+        for k, v in pairs(C) do
+            t[k] = typeof(v) == "EnumItem" and ("E:" .. v.Name .. ":" .. tostring(v.EnumType)) or v
+        end
+        writefile(FILE, Http:JSONEncode(t))
+    end)
+end
+
+local function load()
+    if not (isfile and isfile(FILE) and readfile) then return end
+    local ok, raw = pcall(readfile, FILE)
+    if not ok or raw == "" then return end
+    local ok2, d = pcall(function() return Http:JSONDecode(raw) end)
+    if not ok2 or type(d) ~= "table" then return end
+    for k, v in pairs(d) do
+        if C[k] ~= nil then
+            if type(v) == "string" and v:sub(1, 2) == "E:" then
+                local nm, en = v:match("^E:([%w_]+):([%w_]+)$")
+                local et = en and Enum[en]
+                if et and nm and et[nm] then C[k] = et[nm] end
+            else
+                C[k] = v
+            end
+            if sync[k] then pcall(sync[k], C[k]) end
+        end
+    end
+end
+
+--=============================================================
+--  Уведомления
+--=============================================================
+local nh = keep(Instance.new("Frame"))
+nh.Size = UDim2.new(0, 280, 1, -24)
+nh.Position = UDim2.new(1, -292, 0, 12)
+nh.BackgroundTransparency = 1
+nh.Parent = Gui
+local nl = Instance.new("UIListLayout", nh)
+nl.Padding = UDim.new(0, 6)
+
+local function notify(txt, col)
+    local c = Instance.new("Frame", nh)
+    c.Size = UDim2.new(1, 0, 0, 26)
+    c.BackgroundColor3 = Color3.fromRGB(14, 16, 20)
+    c.BorderSizePixel = 0
+    local s = Instance.new("UIStroke", c)
+    s.Color = col or Color3.fromRGB(90, 170, 255)
+    s.Thickness = 1
+    local l = Instance.new("TextLabel", c)
+    l.Size = UDim2.new(1, -14, 1, 0)
+    l.Position = UDim2.new(0, 10, 0, 0)
+    l.BackgroundTransparency = 1
+    l.Font = Enum.Font.GothamMedium
+    l.TextSize = 12
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.TextColor3 = Color3.fromRGB(235, 240, 250)
+    l.Text = txt
+    task.delay(3.5, function()
+        if not c.Parent then return end
+        Tween:Create(c, TweenInfo.new(0.25), {BackgroundTransparency = 1}):Play()
+        Tween:Create(l, TweenInfo.new(0.25), {TextTransparency = 1}):Play()
+        task.delay(0.3, function() c:Destroy() end)
+    end)
+end
+
+--=============================================================
+--  Данные игры
+--=============================================================
+local Ammo = RS:FindFirstChild("AmmoTypes")
+local Price = {}
+do
+    local list = RS:FindFirstChild("ItemsList")
+    if list then
+        for _, it in ipairs(list:GetChildren()) do
+            local p = it:FindFirstChild("ItemProperties")
+            local cs = p and p:GetAttribute("CallSign")
+            local pr = p and p:GetAttribute("Price")
+            if cs and pr then Price[cs] = pr end
+        end
+    end
+end
+
+local function attr(name, key, def)
+    local a = name and Ammo and Ammo:FindFirstChild(name)
+    if not a then return def end
+    return a:GetAttribute(key) or def
+end
+
+local function priceOf(n) return Price[n] or 0 end
+
+--=============================================================
+--  ESP
+--=============================================================
+local CLR = {
+    player = Color3.fromRGB(255, 90, 90), npc = Color3.fromRGB(255, 165, 70),
+    body = Color3.fromRGB(175, 175, 185), box = Color3.fromRGB(255, 205, 65),
+    item = Color3.fromRGB(120, 230, 150), exit = Color3.fromRGB(80, 240, 140),
+    trap = Color3.fromRGB(255, 125, 55), door = Color3.fromRGB(120, 190, 255),
+}
+
+local function newEsp(kind)
+    local col = CLR[kind] or CLR.player
+    local o = {col = col, on = false}
+    o.b = draw(Drawing.new("Square")); o.b.Thickness = 1; o.b.Filled = false; o.b.Color = col; o.b.Visible = false
+    o.n = draw(Drawing.new("Text")); o.n.Size = 12; o.n.Font = 2; o.n.Center = true; o.n.Outline = true; o.n.Visible = false
+    o.d = draw(Drawing.new("Text")); o.d.Size = 11; o.d.Font = 2; o.d.Center = true; o.d.Outline = true; o.d.Visible = false
+    o.h = draw(Drawing.new("Line")); o.h.Thickness = 2; o.h.Visible = false
+    o.t = draw(Drawing.new("Line")); o.t.Thickness = 1; o.t.Color = col; o.t.Visible = false
+
+    function o:upd(pos, dist, label, hp)
+        local cam = WS.CurrentCamera
+        local hd = cam:WorldToViewportPoint(pos + Vector3.new(0, 1.1, 0))
+        local ft = cam:WorldToViewportPoint(pos - Vector3.new(0, 2.4, 0))
+        if not hd.Z or hd.Z <= 0 then return self:hide() end
+        local hgt = math.abs(ft.Y - hd.Y)
+        local w = hgt * 0.55
+        local top = math.min(hd.Y, ft.Y)
+        local lf = hd.X - w * 0.5
+        self.on = true
+        if C.Box then
+            self.b.Visible = true
+            self.b.Size = Vector2.new(w, hgt)
+            self.b.Position = Vector2.new(lf, top)
+            self.b.Color = self.col
+        else self.b.Visible = false end
+        if C.Name then
+            self.n.Visible = true
+            self.n.Text = label or ""
+            self.n.Color = self.col
+            self.n.Position = Vector2.new(hd.X, top - 15)
+        else self.n.Visible = false end
+        if C.Dist then
+            self.d.Visible = true
+            self.d.Text = ("%d m"):format(math.floor(dist / 3.5))
+            self.d.Position = Vector2.new(hd.X, top + hgt + 2)
+        else self.d.Visible = false end
+        if hp then
+            self.h.Visible = true
+            self.h.From = Vector2.new(lf - 4, top + hgt)
+            self.h.To = Vector2.new(lf - 4, top + hgt * (1 - hp))
+            self.h.Color = Color3.fromRGB(255 * (1 - hp), 255 * hp, 60)
+        else self.h.Visible = false end
+        if C.Tracer then
+            self.t.Visible = true
+            self.t.From = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y)
+            self.t.To = Vector2.new(hd.X, top + hgt)
+        else self.t.Visible = false end
+    end
+
+    function o:hide()
+        if not self.on then return end
+        self.on = false
+        for _, x in ipairs({self.b, self.n, self.d, self.h, self.t}) do x.Visible = false end
+    end
+
+    function o:kill()
+        for _, x in ipairs({self.b, self.n, self.d, self.h, self.t}) do pcall(function() x:Remove() end) end
+    end
+    return o
+end
+
+--=============================================================
+--  Цели / silent aim
+--=============================================================
+local aim = {on = false, held = false}
+local dummy = keep(Instance.new("Part"))
+dummy.Size = Vector3.new(0.1, 0.1, 0.1)
+dummy.Anchored = true
+dummy.CanCollide = false
+dummy.CanQuery = false
+dummy.CastShadow = false
+dummy.Transparency = 1
+dummy.Parent = WS
+
+local function alive(ch)
+    if not ch then return false end
+    local h = ch:FindFirstChildOfClass("Humanoid")
+    return h ~= nil and h.Health > 0 and ch:FindFirstChild("HumanoidRootPart") ~= nil
+end
+
+local function seen(p)
+    local o = Camera.CFrame.Position
+    local rp = RaycastParams.new()
+    rp.FilterType = Enum.RaycastFilterType.Exclude
+    rp.FilterDescendantsInstances = {LP.Character, Camera, dummy}
+    rp.IgnoreWater = true
+    local hit = WS:Raycast(o, p.Position - o, rp)
+    if not hit then return true end
+    return hit.Instance:IsDescendantOf(p.Parent)
+end
+
+local BONES = {"Head", "HeadTopHitBox", "FaceHitBox", "HumanoidRootPart"}
+
+local function bone(ch)
+    if not ch then return nil end
+    local order = {C.Bone}
+    for _, b in ipairs(BONES) do order[#order+1] = b end
+    for _, n in ipairs(order) do
+        local p = ch:FindFirstChild(n)
+        if p and p:IsA("BasePart") then return p end
+    end
+    return ch:FindFirstChildWhichIsA("BasePart")
+end
+
+local function target()
+    local mid = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    local best, bd = nil, C.Fov
+
+    local function check(ch, nm)
+        if not alive(ch) then return end
+        local b = bone(ch)
+        if not b then return end
+        if C.WallCheck and not seen(b) then return end
+        local sp, on = Camera:WorldToViewportPoint(b.Position)
+        if not on then return end
+        local dd = (Vector2.new(sp.X, sp.Y) - mid).Magnitude
+        if dd < bd then bd = dd best = {p = b, ch = ch, nm = nm} end
+    end
+
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if pl ~= LP then check(pl.Character, pl.Name) end
+    end
+    if C.NpcAim then
+        local z = WS:FindFirstChild("AiZones")
+        if z then
+            for _, zone in ipairs(z:GetChildren()) do
+                for _, m in ipairs(zone:GetChildren()) do
+                    if m:IsA("Model") and m:FindFirstChildOfClass("Humanoid") then check(m, m.Name) end
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function aimPatch(args, n)
+    local t = target()
+    if not t then return end
+
+    local idx
+    for i = 1, n do
+        local v = args[i]
+        if typeof(v) == "Instance" and v:IsA("BasePart") and v.Name == "AimPart" then idx = i break end
+    end
+    if not idx then
+        local v5 = args[5]
+        if typeof(v5) == "Instance" and v5:IsA("BasePart") then idx = 5 end
+    end
+    if not idx then return end
+
+    local origin = args[idx].Position
+    local pos = t.p.Position
+
+    if C.Predict then
+        local ammo
+        local a7 = args[7]
+        if type(a7) == "string" then ammo = a7 end
+        local spd  = attr(ammo, "MuzzleVelocity", 850)
+        local drop = attr(ammo, "ProjectileDrop", 0)
+        local vel  = t.p.AssemblyLinearVelocity or Vector3.zero
+        local tm   = (pos - origin).Magnitude / math.max(spd, 1)
+        pos = pos + vel * tm + Vector3.new(0, 0.5 * (drop * 2) * tm * tm, 0)
+    end
+
+    dummy.CFrame = CFrame.new(origin, pos)
+    args[idx] = dummy
+end
+
+-- установка хука на поле таблицы (проверенный путь)
+local BulletTbl, BulletOrig
+do
+    local mods = RS:FindFirstChild("Modules")
+    local fps  = mods and mods:FindFirstChild("FPS")
+    local bm   = fps and fps:FindFirstChild("Bullet")
+    if bm then
+        local ok, r = pcall(require, bm)
+        if ok and type(r) == "table" and type(r.CreateBullet) == "function" then
+            BulletTbl  = r
+            BulletOrig = r.CreateBullet
+            r.CreateBullet = function(...)
+                local a, n = table.pack(...), select("#", ...)
+                if running and aim.on and aim.held then pcall(aimPatch, a, n) end
+                return BulletOrig(table.unpack(a, 1, n))
+            end
+            notify("silent aim: установлен")
+        else
+            notify("silent aim: модуль Bullet не отдался", Color3.fromRGB(255, 120, 120))
+        end
+    else
+        notify("silent aim: модуль Bullet не найден", Color3.fromRGB(255, 120, 120))
+    end
+end
+
+local fovc = draw(Drawing.new("Circle"))
+fovc.Thickness = 1
+fovc.NumSides = 72
+fovc.Filled = false
+fovc.Color = Color3.fromRGB(90, 170, 255)
+fovc.Visible = false
+
+local aimHeld = false
+local function aimbot()
+    local t = target()
+    if not t then return end
+    local cf = CFrame.new(Camera.CFrame.Position, t.p.Position)
+    Camera.CFrame = Camera.CFrame:Lerp(cf, math.clamp(0.25 / math.max(C.Smooth, 0.1), 0.02, 1))
+end
+
+--=============================================================
+--  Баллистика
+--=============================================================
+local cache = {}
+local function ammoMods()
+    if not Ammo then return end
+    for _, a in ipairs(Ammo:GetChildren()) do
+        if not cache[a] then
+            cache[a] = {r = a:GetAttribute("RecoilStrength"), d = a:GetAttribute("ProjectileDrop"), g = a:GetAttribute("Drag")}
+        end
+        local o = cache[a]
+        a:SetAttribute("RecoilStrength", C.NoRecoil and 0 or o.r)
+        a:SetAttribute("ProjectileDrop", C.NoDrop and 0 or o.d)
+        a:SetAttribute("Drag", C.NoDrag and 0 or o.g)
+    end
+end
+
+--=============================================================
+--  Сущности
+--=============================================================
+local L = {player = {}, npc = {}, body = {}, box = {}, item = {}, exit = {}, door = {}, trap = {}}
+local TRAPS = {PMN2 = true, MON50 = true, GrenadeTrap = true}
+
+local function clr(k) for i in pairs(L[k]) do L[k][i] = nil end end
+
+local function scan()
+    clr("player")
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if pl ~= LP and alive(pl.Character) then L.player[pl.Character] = pl.Name end
+    end
+
+    clr("npc")
+    clr("trap")
+    local z = WS:FindFirstChild("AiZones")
+    if z then
+        for _, zone in ipairs(z:GetChildren()) do
+            local zl = zone.Name:lower()
+            local isTrapZone = zl:find("mine") or zl:find("claymore")
+            for _, m in ipairs(zone:GetChildren()) do
+                if m:IsA("Model") then
+                    if isTrapZone or TRAPS[m.Name] then
+                        L.trap[m] = m.Name
+                    elseif m:FindFirstChildOfClass("Humanoid") then
+                        L.npc[m] = m.Name
+                    end
+                end
+            end
+        end
+    end
+
+    clr("body")
+    for _, m in ipairs(WS:GetChildren()) do
+        if m:IsA("Model") and not Players:GetPlayerFromCharacter(m) and not L.npc[m] then
+            local h = m:FindFirstChildOfClass("Humanoid")
+            if h and h.Health <= 0 then L.body[m] = true end
+        end
+    end
+
+    clr("box")
+    local ct = WS:FindFirstChild("Containers")
+    if ct then
+        for _, m in ipairs(ct:GetDescendants()) do
+            if m:IsA("Model") and m:FindFirstChild("Inventory") and m:FindFirstChild("Properties") then
+                L.box[m] = m:GetAttribute("DisplayName") or m.Name
+            end
+        end
+    end
+
+    clr("item")
+    local di = WS:FindFirstChild("DroppedItems")
+    if di then
+        for _, m in ipairs(di:GetChildren()) do
+            if m:IsA("Model") then L.item[m] = m.Name end
+        end
+    end
+
+    clr("exit")
+    clr("door")
+    local nc = WS:FindFirstChild("NoCollision")
+    if nc then
+        local ex = nc:FindFirstChild("ExitLocations")
+        if ex then for _, m in ipairs(ex:GetChildren()) do L.exit[m] = m.Name end end
+        local pf = nc:FindFirstChild("PathFinding")
+        local dp = pf and pf:FindFirstChild("DoorPass")
+        if dp then for _, m in ipairs(dp:GetChildren()) do L.door[m] = true end end
+    end
+end
+
+local function boxInfo(m)
+    local inv = m:FindFirstChild("Inventory")
+    if not inv then return "пусто", 0, 0 end
+    local total, cnt = 0, 0
+    local names = {}
+    for _, it in ipairs(inv:GetChildren()) do
+        cnt = cnt + 1
+        total = total + priceOf(it.Name)
+        if cnt <= 4 then names[#names+1] = it.Name end
+    end
+    if cnt == 0 then return "пусто", 0, 0 end
+    return table.concat(names, ", ") .. (cnt > 4 and (" +" .. (cnt - 4)) or ""), total, cnt
+end
+
+local esp = {}
+local function render(kind, on, maxD, lab)
+    for inst, info in pairs(L[kind]) do
+        local o = esp[inst]
+        if on then
+            local root = inst:FindFirstChild("HumanoidRootPart") or inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart")
+            local me = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+            if root and me then
+                local d = (root.Position - me.Position).Magnitude
+                local show = d <= maxD
+                if kind == "box" and C.OnlyFilled then
+                    local _, _, cnt = boxInfo(inst)
+                    if cnt == 0 then show = false end
+                end
+                if show then
+                    if not o then o = newEsp(kind); o.tgt = inst; esp[inst] = o end
+                    local h = inst:FindFirstChildOfClass("Humanoid")
+                    o:upd(root.Position, d, lab(inst, info), h and math.clamp(h.Health / math.max(h.MaxHealth, 1), 0, 1) or nil)
+                elseif o then o:hide() end
+            elseif o then o:hide() end
+        elseif o then o:hide() end
+    end
+end
+
+--=============================================================
+--  Свет / экран
+--=============================================================
+local base = {b = Lighting.Brightness, t = Lighting.ClockTime, f = Lighting.FogEnd, s = Lighting.FogStart}
+local function light()
+    if not running then return end
+    if C.Bright then
+        Lighting.Brightness = 3
+        Lighting.ClockTime = 14
+        Lighting.Ambient = Color3.fromRGB(190, 190, 190)
+        Lighting.OutdoorAmbient = Color3.fromRGB(190, 190, 190)
+        local a = Lighting:FindFirstChildOfClass("Atmosphere")
+        if a then a.Density = 0 a.Haze = 0 end
+    else
+        Lighting.Brightness = base.b
+        Lighting.ClockTime = base.t
+    end
+    if C.NoFog then
+        Lighting.FogEnd = 1e6
+        Lighting.FogStart = 1e6
+    else
+        Lighting.FogEnd = base.f
+        Lighting.FogStart = base.s
+    end
+    pcall(function() WS.Terrain.Decoration = not C.NoGrass end)
+end
+
+local function fx()
+    local pg = LP:FindFirstChild("PlayerGui")
+    local mg = pg and pg:FindFirstChild("MainGui")
+    local mf = mg and mg:FindFirstChild("MainFrame")
+    local sf = mf and mf:FindFirstChild("ScreenEffects")
+    if not sf then return end
+    if C.NoFlash then
+        local f = sf:FindFirstChild("Flashbang")
+        if f and f:IsA("GuiObject") then f.Visible = false end
+    end
+    if C.NoVisor then
+        local v = sf:FindFirstChild("Visor")
+        if v then
+            for _, d in ipairs(v:GetDescendants()) do
+                local n = d.Name
+                if n == "Glass" or n == "GlassDirt" or n == "TopRim" or n == "NVG" then
+                    if d:IsA("Frame") then d.BackgroundTransparency = 1
+                    elseif d:IsA("ImageLabel") then d.ImageTransparency = 1
+                    elseif d:IsA("GuiObject") then d.Visible = false end
+                end
+            end
+        end
+    end
+end
+
+--=============================================================
+--  Движение
+--=============================================================
+local speedHook
+do
+    local ok = pcall(function()
+        speedHook = hookmetamethod(game, "__newindex", newcclosure(function(self, k, v)
+            if k == "WalkSpeed" and C.Speed and typeof(self) == "Instance" and self:IsA("Humanoid") then
+                local ch = LP.Character
+                if ch and self == ch:FindFirstChildOfClass("Humanoid") then
+                    return speedHook(self, k, C.SpeedVal)
+                end
+            end
+            return speedHook(self, k, v)
+        end))
+    end)
+    if not ok then speedHook = nil end
+end
+
+track(UIS.JumpRequest:Connect(function()
+    if not C.InfJump then return end
+    local h = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
+    if h then h:ChangeState(Enum.HumanoidStateType.Jumping) end
+end))
+
+local function cam()
+    pcall(function()
+        LP.CameraMinZoomDistance = 0.5
+        LP.CameraMaxZoomDistance = C.Third and 14 or 0.5
+    end)
+end
+track(LP.CharacterAdded:Connect(function() task.wait(0.6) cam() end))
+
+--=============================================================
+--  Лут
+--=============================================================
+local function lootScroller()
+    local pg = LP:FindFirstChild("PlayerGui")
+    local mg = pg and pg:FindFirstChild("MainGui")
+    local bp = mg and mg:FindFirstChild("BackpackFrame")
+    local lt = bp and bp:FindFirstChild("Loot")
+    local inv = lt and lt:FindFirstChild("Inventory")
+    if not inv then return nil end
+    for _, d in ipairs(inv:GetDescendants()) do
+        if d:IsA("ScrollingFrame") then return d end
+    end
+    return nil
+end
+
+local function quickMove()
+    local rm = RS:FindFirstChild("Remotes")
+    return rm and rm:FindFirstChild("QuickMove")
+end
+
+local function lootGui()
+    local sc = lootScroller()
+    local qm = quickMove()
+    if not (sc and qm) then return 0 end
+    local sent = 0
+    for _, grp in ipairs(sc:GetChildren()) do
+        local fr = grp:FindFirstChild("Frame")
+        if fr then
+            for _, slot in ipairs(fr:GetChildren()) do
+                local iv = slot:FindFirstChild("Item")
+                if iv and iv:IsA("ObjectValue") and iv.Value then
+                    if priceOf(iv.Value.Name) >= C.LootMin then
+                        pcall(function() qm:FireServer(slot.Name, iv.Value.Parent) end)
+                        sent = sent + 1
+                    end
+                end
+            end
+        end
+    end
+    return sent
+end
+
+local function currentContainer()
+    local p  = RS:FindFirstChild("Players")
+    local me = p and p:FindFirstChild(LP.Name)
+    local st = me and me:FindFirstChild("Status")
+    local gv = st and st:FindFirstChild("GameplayVariables")
+    local cc = gv and gv:FindFirstChild("CurrentContainer")
+    if not cc then return nil end
+    local v = cc:IsA("ObjectValue") and cc.Value or cc
+    if typeof(v) ~= "Instance" then return nil end
+    return v
+end
+
+local function lootContainer()
+    local c = currentContainer()
+    local qm = quickMove()
+    if not (c and qm) then return 0 end
+    local inv = c:FindFirstChild("Inventory")
+    if not inv then return 0 end
+    local sent = 0
+    for _, it in ipairs(inv:GetChildren()) do
+        if priceOf(it.Name) >= C.LootMin then
+            pcall(function() qm:FireServer(it.Name, it) end)
+            pcall(function() qm:FireServer(it.Name, inv) end)
+            sent = sent + 1
+        end
+    end
+    return sent
+end
+
+local function lootAll()
+    local a = lootGui()
+    local b = lootContainer()
+    if a + b == 0 then
+        notify("лута нет (ящик не открыт или порог высокий)", Color3.fromRGB(255, 180, 60))
+    else
+        notify(("отправлено: %d"):format(a + b))
+    end
+end
+
+local function nearestBox()
+    local me = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    if not me then return end
+    local best, bd = nil, 18
+    for inst in pairs(L.box) do
+        local r = inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart")
+        if r then
+            local d = (r.Position - me.Position).Magnitude
+            if d < bd then bd = d best = r end
+        end
+    end
+    if not best then return notify("рядом ящиков нет", Color3.fromRGB(255, 180, 60)) end
+    Camera.CFrame = CFrame.new(Camera.CFrame.Position, best.Position)
+    task.wait(0.08)
+    pcall(function() mouse1click() end)
+end
+
+local function passDoor()
+    local me = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    if not me then return end
+    local best, bd = nil, 45
+    for inst in pairs(L.door) do
+        if inst:IsA("BasePart") then
+            local d = (inst.Position - me.Position).Magnitude
+            if d < bd then bd = d best = inst end
+        end
+    end
+    if not best then return notify("дверь не найдена", Color3.fromRGB(255, 180, 60)) end
+    me.CFrame = CFrame.new(best.Position + Vector3.new(0, 3, 0))
+    notify("прошёл дверь", Color3.fromRGB(150, 220, 255))
+end
+
+local function gotoExit()
+    local me = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    if not me then return end
+    local best, bd = nil, 1e6
+    for inst in pairs(L.exit) do
+        local r = inst:IsA("BasePart") and inst or inst:FindFirstChildWhichIsA("BasePart")
+        if r then
+            local d = (r.Position - me.Position).Magnitude
+            if d < bd then bd = d best = r end
+        end
+    end
+    if not best then return notify("выходов нет", Color3.fromRGB(255, 180, 60)) end
+    me.CFrame = CFrame.new(best.Position + Vector3.new(0, 3, 0))
+    notify(("выход: %d м"):format(math.floor(bd / 3.5)), Color3.fromRGB(150, 220, 255))
+end
+
+--=============================================================
+--  Диагностика
+--=============================================================
+local function dump(name, text)
+    if writefile then pcall(writefile, name, text) end
+    if setclipboard then pcall(setclipboard, text) end
+    notify(("дамп: %s (%d симв.)"):format(name, #text))
+end
+
+local function dumpLoot()
+    local out = {}
+    local pg = LP:FindFirstChild("PlayerGui")
+    local mg = pg and pg:FindFirstChild("MainGui")
+    if not mg then return dump("VeniceLoot.txt", "MainGui нет") end
+    local function walk(inst, depth)
+        if depth > 6 then return end
+        out[#out+1] = string.rep("  ", depth) .. inst.Name .. " | " .. inst.ClassName
+        for _, ch in ipairs(inst:GetChildren()) do walk(ch, depth + 1) end
+    end
+    walk(mg, 0)
+    out[#out+1] = "--- CurrentContainer: " .. tostring(currentContainer())
+    dump("VeniceLoot.txt", table.concat(out, "\n"))
+end
+
+local function dumpRemotes()
+    local out = {}
+    local rm = RS:FindFirstChild("Remotes")
+    if rm then
+        for _, r in ipairs(rm:GetChildren()) do
+            out[#out+1] = r.Name .. " | " .. r.ClassName
+            for _, ch in ipairs(r:GetChildren()) do out[#out+1] = "  " .. ch.Name .. " | " .. ch.ClassName end
+        end
+    end
+    dump("VeniceRemotes.txt", table.concat(out, "\n"))
+end
+
+local function dumpFactions()
+    local out = {}
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if pl.Character then
+            out[#out+1] = pl.Name .. " | fac=" .. tostring(pl.Character:GetAttribute("Faction"))
+        end
+    end
+    local z = WS:FindFirstChild("AiZones")
+    if z then
+        for _, zone in ipairs(z:GetChildren()) do
+            for _, m in ipairs(zone:GetChildren()) do
+                if m:IsA("Model") and m:FindFirstChildOfClass("Humanoid") then
+                    out[#out+1] = "NPC " .. m.Name .. " | fac=" .. tostring(m:GetAttribute("Faction"))
+                    break
+                end
+            end
+        end
+    end
+    dump("VeniceFactions.txt", table.concat(out, "\n"))
+end
+
+--=============================================================
+--  Циклы
+--=============================================================
+track(RunService.RenderStepped:Connect(function()
+    if not running then return end
+    Camera = WS.CurrentCamera
+
+    if C.Circle and aim.on then
+        fovc.Visible = true
+        fovc.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+        fovc.Radius = C.Fov
+    else
+        fovc.Visible = false
+    end
+
+    if C.Aimbot and aimHeld then aimbot() end
+
+    render("player", C.P_Players, C.DistPlayer, function(i) return tostring(L.player[i]) end)
+    render("npc", C.P_Npc, C.DistNpc, function(i) return "[AI] " .. tostring(L.npc[i]) end)
+    render("body", C.P_Body, C.DistPlayer, function() return "[ТРУП]" end)
+    render("item", C.P_Item, C.DistBox, function(i) return tostring(L.item[i]) end)
+    render("exit", C.P_Exit, 1e5, function(i) return "[ВЫХОД] " .. tostring(L.exit[i]) end)
+    render("trap", C.P_Trap, 300, function(i) return "[МИНА] " .. tostring(L.trap[i]) end)
+    render("box", C.P_Box, C.DistBox, function(inst, i)
+        local txt, total = boxInfo(inst)
+        local ns = inst:GetAttribute("NextSpawn")
+        local tm = ns and math.max(0, math.floor(ns - os.time())) or 0
+        return ("[%s] %d₽ %s%s"):format(tostring(i), total, txt, tm > 0 and (" (" .. tm .. "s)") or "")
+    end)
+
+    if C.NoVisor or C.NoFlash then fx() end
+end))
+
+track(RunService.Heartbeat:Connect(function()
+    if not running or not C.Speed then return end
+    local h = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
+    if h and h.WalkSpeed ~= C.SpeedVal then h.WalkSpeed = C.SpeedVal end
+end))
+
+task.spawn(function() while running do pcall(scan) task.wait(0.45) end end)
+task.spawn(function() while running do if C.AutoLoot then pcall(lootAll) end task.wait(C.LootDelay) end end)
+task.spawn(function()
+    while running do
+        if C.AutoShoot then
+            local ch = LP.Character
+            local hold = ch and ch:FindFirstChild("Holding")
+            if hold and hold.Value and target() then
+                pcall(function() mouse1press() task.wait(C.ShootDelay) mouse1release() end)
+            end
+        end
+        task.wait(0.08)
+    end
+end)
+task.spawn(function()
+    while running do
+        pcall(light)
+        if C.NoRecoil or C.NoDrop or C.NoDrag then pcall(ammoMods) end
+        task.wait(0.5)
+    end
+end)
+
+--=============================================================
+--  Ввод
+--=============================================================
+track(UIS.InputBegan:Connect(function(i, gpe)
+    if gpe then return end
+    if i.KeyCode == C.SilentKey then aim.held = true end
+    if i.KeyCode == C.AimbotKey then aimHeld = true end
+    if i.KeyCode == C.MenuKey and not UIS:GetFocusedTextBox() then Gui.Enabled = not Gui.Enabled end
+end))
+track(UIS.InputEnded:Connect(function(i)
+    if i.KeyCode == C.SilentKey then aim.held = false end
+    if i.KeyCode == C.AimbotKey then aimHeld = false end
+end))
+
+--=============================================================
+--  UI
+--=============================================================
+local W = keep(Instance.new("Frame"))
+W.Size = UDim2.new(0, 540, 0, 400)
+W.Position = UDim2.new(0.5, -270, 0.5, -200)
+W.BackgroundColor3 = Color3.fromRGB(10, 11, 14)
+W.BorderSizePixel = 0
+W.Parent = Gui
+Instance.new("UICorner", W).CornerRadius = UDim.new(0, 5)
+local wstroke = Instance.new("UIStroke", W)
+wstroke.Color = Color3.fromRGB(38, 44, 56)
+wstroke.Thickness = 1
+
+local top = Instance.new("Frame", W)
+top.Size = UDim2.new(1, 0, 0, 30)
+top.BackgroundColor3 = Color3.fromRGB(15, 17, 22)
+top.BorderSizePixel = 0
+Instance.new("UICorner", top).CornerRadius = UDim.new(0, 5)
+local ac = Instance.new("Frame", top)
+ac.Size = UDim2.new(1, 0, 0, 2)
+ac.BackgroundColor3 = Color3.fromRGB(90, 170, 255)
+ac.BorderSizePixel = 0
+local ti = Instance.new("TextLabel", top)
+ti.Size = UDim2.new(0, 240, 1, 0)
+ti.Position = UDim2.new(0, 12, 0, 0)
+ti.BackgroundTransparency = 1
+ti.Font = Enum.Font.GothamBold
+ti.TextSize = 12
+ti.TextXAlignment = Enum.TextXAlignment.Left
+ti.TextColor3 = Color3.fromRGB(240, 245, 255)
+ti.Text = ("venice v5 · [%s]"):format(C.MenuKey.Name)
+
+local tb = Instance.new("Frame", top)
+tb.Size = UDim2.new(0, 340, 1, 0)
+tb.Position = UDim2.new(1, -350, 0, 0)
+tb.BackgroundTransparency = 1
+local tl = Instance.new("UIListLayout", tb)
+tl.FillDirection = Enum.FillDirection.Horizontal
+tl.VerticalAlignment = Enum.VerticalAlignment.Center
+tl.Padding = UDim.new(0, 8)
+tl.HorizontalAlignment = Enum.HorizontalAlignment.Right
+
+local body = Instance.new("Frame", W)
+body.Size = UDim2.new(1, -12, 1, -42)
+body.Position = UDim2.new(0, 6, 0, 36)
+body.BackgroundTransparency = 1
+
+local pages = {}
+local function page(nm)
+    local b = Instance.new("TextButton", tb)
+    b.Size = UDim2.new(0, 0, 1, 0)
+    b.AutomaticSize = Enum.AutomaticSize.X
+    b.BackgroundTransparency = 1
+    b.Font = Enum.Font.GothamMedium
+    b.TextSize = 12
+    b.Text = nm
+    b.TextColor3 = Color3.fromRGB(150, 158, 172)
+    local f = Instance.new("Frame", body)
+    f.Size = UDim2.new(1, 0, 1, 0)
+    f.BackgroundTransparency = 1
+    f.Visible = false
+    local sc = Instance.new("ScrollingFrame", f)
+    sc.Size = UDim2.new(1, 0, 1, 0)
+    sc.BackgroundTransparency = 1
+    sc.BorderSizePixel = 0
+    sc.ScrollBarThickness = 2
+    sc.ScrollBarImageColor3 = Color3.fromRGB(90, 170, 255)
+    sc.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    sc.CanvasSize = UDim2.new(0, 0, 0, 0)
+    local l = Instance.new("UIListLayout", sc)
+    l.Padding = UDim.new(0, 5)
+    pages[nm] = {b = b, f = f}
+    b.MouseButton1Click:Connect(function()
+        for k, p in pairs(pages) do
+            p.f.Visible = k == nm
+            p.b.TextColor3 = k == nm and Color3.fromRGB(245, 250, 255) or Color3.fromRGB(150, 158, 172)
+        end
+    end)
+    return sc
+end
+
+local function tog(par, txt, key, cb)
+    local r = Instance.new("Frame", par)
+    r.Size = UDim2.new(1, 0, 0, 22)
+    r.BackgroundTransparency = 1
+    local bx = Instance.new("TextButton", r)
+    bx.Size = UDim2.new(0, 15, 0, 15)
+    bx.Position = UDim2.new(0, 0, 0.5, -7)
+    bx.BackgroundColor3 = C[key] and Color3.fromRGB(90, 170, 255) or Color3.fromRGB(26, 30, 38)
+    bx.BorderSizePixel = 0
+    bx.Text = C[key] and "✓" or ""
+    bx.TextSize = 10
+    bx.Font = Enum.Font.GothamBold
+    bx.TextColor3 = Color3.fromRGB(10, 16, 26)
+    Instance.new("UICorner", bx).CornerRadius = UDim.new(0, 2)
+    local lb = Instance.new("TextButton", r)
+    lb.Size = UDim2.new(1, -24, 1, 0)
+    lb.Position = UDim2.new(0, 24, 0, 0)
+    lb.BackgroundTransparency = 1
+    lb.Font = Enum.Font.GothamMedium
+    lb.TextSize = 12
+    lb.TextXAlignment = Enum.TextXAlignment.Left
+    lb.Text = txt
+    lb.TextColor3 = Color3.fromRGB(200, 206, 218)
+    local function set(v)
+        C[key] = v
+        bx.BackgroundColor3 = v and Color3.fromRGB(90, 170, 255) or Color3.fromRGB(26, 30, 38)
+        bx.Text = v and "✓" or ""
+        if key == "Silent" then aim.on = v end
+        if cb then pcall(cb, v) end
+        save()
+    end
+    bx.MouseButton1Click:Connect(function() set(not C[key]) end)
+    lb.MouseButton1Click:Connect(function() set(not C[key]) end)
+    sync[key] = set
+end
+
+local function sld(par, txt, key, mn, mx, st)
+    local h = Instance.new("Frame", par)
+    h.Size = UDim2.new(1, 0, 0, 30)
+    h.BackgroundTransparency = 1
+    local lb = Instance.new("TextLabel", h)
+    lb.Size = UDim2.new(1, -60, 0, 14)
+    lb.BackgroundTransparency = 1
+    lb.Font = Enum.Font.GothamMedium
+    lb.TextSize = 12
+    lb.TextXAlignment = Enum.TextXAlignment.Left
+    lb.TextColor3 = Color3.fromRGB(200, 206, 218)
+    lb.Text = txt
+    local vv = Instance.new("TextLabel", h)
+    vv.Size = UDim2.new(0, 60, 0, 14)
+    vv.Position = UDim2.new(1, -60, 0, 0)
+    vv.BackgroundTransparency = 1
+    vv.Font = Enum.Font.GothamBold
+    vv.TextSize = 12
+    vv.TextXAlignment = Enum.TextXAlignment.Right
+    vv.TextColor3 = Color3.fromRGB(90, 170, 255)
+    vv.Text = tostring(C[key])
+    local bar = Instance.new("Frame", h)
+    bar.Size = UDim2.new(1, 0, 0, 5)
+    bar.Position = UDim2.new(0, 0, 0, 19)
+    bar.BackgroundColor3 = Color3.fromRGB(20, 23, 30)
+    bar.BorderSizePixel = 0
+    Instance.new("UICorner", bar).CornerRadius = UDim.new(0, 2)
+    local fl = Instance.new("Frame", bar)
+    fl.Size = UDim2.new((C[key] - mn) / (mx - mn), 0, 1, 0)
+    fl.BackgroundColor3 = Color3.fromRGB(90, 170, 255)
+    fl.BorderSizePixel = 0
+    Instance.new("UICorner", fl).CornerRadius = UDim.new(0, 2)
+    local drag = false
+    local function upd(x)
+        local rt = math.clamp((x - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
+        local v = mn + rt * (mx - mn)
+        if st >= 1 then v = math.floor(v / st + 0.5) * st else v = math.floor(v * 100 + 0.5) / 100 end
+        C[key] = v
+        fl.Size = UDim2.new(rt, 0, 1, 0)
+        vv.Text = tostring(v)
+        save()
+    end
+    bar.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            drag = true
+            upd(i.Position.X)
+            i.Changed:Connect(function() if i.UserInputState == Enum.UserInputState.End then drag = false end end)
+        end
+    end)
+    track(UIS.InputChanged:Connect(function(i)
+        if drag and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            upd(i.Position.X)
+        end
+    end))
+    sync[key] = function(v)
+        local rt = math.clamp((v - mn) / (mx - mn), 0, 1)
+        fl.Size = UDim2.new(rt, 0, 1, 0)
+        vv.Text = tostring(v)
+    end
+end
+
+local function btn(par, txt, cb)
+    local b = Instance.new("TextButton", par)
+    b.Size = UDim2.new(1, 0, 0, 24)
+    b.BackgroundColor3 = Color3.fromRGB(24, 28, 36)
+    b.BorderSizePixel = 0
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 12
+    b.TextColor3 = Color3.fromRGB(235, 240, 250)
+    b.Text = txt
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 3)
+    b.MouseButton1Click:Connect(function() pcall(cb) end)
+end
+
+local function sec(par, txt)
+    local l = Instance.new("TextLabel", par)
+    l.Size = UDim2.new(1, 0, 0, 20)
+    l.BackgroundTransparency = 1
+    l.Font = Enum.Font.GothamBold
+    l.TextSize = 11
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.TextColor3 = Color3.fromRGB(110, 175, 255)
+    l.Text = txt:upper()
+end
+
+do
+    local p = page("Combat")
+    sec(p, "silent aim")
+    tog(p, "включить", "Silent")
+    sld(p, "FOV", "Fov", 40, 700, 5)
+    tog(p, "только видимые", "WallCheck")
+    tog(p, "предикция", "Predict")
+    tog(p, "бить NPC", "NpcAim")
+    tog(p, "круг FOV", "Circle")
+    btn(p, "кость: " .. C.Bone, function()
+        local i = 1
+        for k, v in ipairs(BONES) do if v == C.Bone then i = k end end
+        C.Bone = BONES[i % #BONES + 1]
+        notify("кость: " .. C.Bone)
+        save()
+    end)
+    sec(p, "аимбот")
+    tog(p, "камера-аимбот", "Aimbot")
+    sld(p, "плавность", "Smooth", 0.1, 4, 0.1)
+    sec(p, "баллистика")
+    tog(p, "no recoil", "NoRecoil")
+    tog(p, "no drop", "NoDrop")
+    tog(p, "no drag", "NoDrag")
+    sec(p, "авто-огонь")
+    tog(p, "auto shoot", "AutoShoot")
+    sld(p, "задержка x100", "ShootDelay", 0.01, 0.3, 0.01)
+end
+
+do
+    local p = page("Visuals")
+    sec(p, "цели")
+    tog(p, "игроки", "P_Players")
+    tog(p, "NPC", "P_Npc")
+    tog(p, "трупы", "P_Body")
+    tog(p, "контейнеры", "P_Box")
+    tog(p, "дроп", "P_Item")
+    tog(p, "выходы", "P_Exit")
+    tog(p, "мины", "P_Trap")
+    sec(p, "стиль")
+    tog(p, "боксы", "Box")
+    tog(p, "имена", "Name")
+    tog(p, "дистанция", "Dist")
+    tog(p, "трейсеры", "Tracer")
+    tog(p, "только непустые ящики", "OnlyFilled")
+    sec(p, "радиусы")
+    sld(p, "игроки", "DistPlayer", 100, 4000, 50)
+    sld(p, "NPC", "DistNpc", 100, 4000, 50)
+    sld(p, "ящики/дроп", "DistBox", 50, 1200, 25)
+end
+
+do
+    local p = page("Movement")
+    tog(p, "speedhack", "Speed")
+    sld(p, "скорость (база 8)", "SpeedVal", 8, 80, 1)
+    tog(p, "infinity jump", "InfJump")
+    tog(p, "третье лицо", "Third", cam)
+    sec(p, "навигация")
+    btn(p, "пройти дверь", passDoor)
+    btn(p, "телепорт к выходу", gotoExit)
+end
+
+do
+    local p = page("Loot")
+    sec(p, "авто-лут")
+    tog(p, "включить (ящик открыт)", "AutoLoot")
+    sld(p, "задержка x100", "LootDelay", 0.01, 0.5, 0.01)
+    sld(p, "мин. цена", "LootMin", 0, 5000, 25)
+    btn(p, "залутать сейчас", lootAll)
+    btn(p, "только через контейнер", function()
+        local n = lootContainer()
+        notify(("контейнер: %d"):format(n), n > 0 and nil or Color3.fromRGB(255, 180, 60))
+    end)
+    btn(p, "открыть ближний ящик", nearestBox)
+    sec(p, "порог по цене")
+    local hint = Instance.new("TextLabel", p)
+    hint.Size = UDim2.new(1, 0, 0, 48)
+    hint.BackgroundTransparency = 1
+    hint.Font = Enum.Font.Gotham
+    hint.TextSize = 11
+    hint.TextWrapped = true
+    hint.TextXAlignment = Enum.TextXAlignment.Left
+    hint.TextColor3 = Color3.fromRGB(140, 148, 162)
+    hint.Text = "Ориентир: AA Battery 750, AI-2 1000, AI-4 3390, AA2 4000. Порог 1000 — мусор остаётся в ящике, дорогое уходит."
+end
+
+do
+    local p = page("Misc")
+    sec(p, "свет")
+    tog(p, "fullbright", "Bright")
+    tog(p, "убрать туман", "NoFog")
+    tog(p, "убрать траву", "NoGrass")
+    tog(p, "убрать визор", "NoVisor")
+    tog(p, "убрать флешку", "NoFlash")
+    sec(p, "система")
+    btn(p, "сохранить", function() save() notify("сохранено") end)
+    btn(p, "загрузить", function() load() notify("загружено") end)
+    btn(p, "выгрузить", function() if G.VenicePD_Unload then G.VenicePD_Unload() end end)
+end
+
+do
+    local p = page("Debug")
+    sec(p, "дампы (пишут в файл + буфер)")
+    btn(p, "лут-панель", dumpLoot)
+    btn(p, "ремоуты", dumpRemotes)
+    btn(p, "фракции", dumpFactions)
+    sec(p, "проверка")
+    btn(p, "статус хука", function()
+        notify(BulletTbl and "хук на месте" or "хука нет", BulletTbl and nil or Color3.fromRGB(255, 120, 120))
+    end)
+    btn(p, "тест цели в прицеле", function()
+        local t = target()
+        notify(t and ("цель: " .. tostring(t.nm)) or "целей в FOV нет", t and nil or Color3.fromRGB(255, 180, 60))
+    end)
+end
+
+do
+    local dg, st, p0 = false, nil, nil
+    top.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dg = true
+            st = i.Position
+            p0 = W.Position
+            i.Changed:Connect(function() if i.UserInputState == Enum.UserInputState.End then dg = false end end)
+        end
+    end)
+    track(UIS.InputChanged:Connect(function(i)
+        if dg and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            local d = i.Position - st
+            W.Position = UDim2.new(p0.X.Scale, p0.X.Offset + d.X, p0.Y.Scale, p0.Y.Offset + d.Y)
+        end
+    end))
+end
+
+pages.Combat.b.TextColor3 = Color3.fromRGB(245, 250, 255)
+pages.Combat.f.Visible = true
+
+load()
+aim.on = C.Silent
+pcall(ammoMods)
+pcall(light)
+pcall(cam)
+
+--=============================================================
+--  Выгрузка
+--=============================================================
+G.VenicePD_Unload = function()
+    if not running then return end
+    running = false
+    for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+    for i, o in pairs(esp) do pcall(function() o:kill() end) esp[i] = nil end
+    for _, d in ipairs(draws) do pcall(function() d:Remove() end) end
+    for _, i in ipairs(insts) do pcall(function() i:Destroy() end) end
+    if BulletTbl and BulletOrig then pcall(function() BulletTbl.CreateBullet = BulletOrig end) end
+    if speedHook then pcall(function() hookmetamethod(game, "__newindex", speedHook) end) end
+    if Ammo then
+        for a, o in pairs(cache) do
+            if a.Parent then
+                pcall(function()
+                    a:SetAttribute("RecoilStrength", o.r)
+                    a:SetAttribute("ProjectileDrop", o.d)
+                    a:SetAttribute("Drag", o.g)
+                end)
+            end
+        end
+    end
+    pcall(function()
+        Lighting.Brightness = base.b
+        Lighting.ClockTime = base.t
+        Lighting.FogEnd = base.f
+        Lighting.FogStart = base.s
+        WS.Terrain.Decoration = true
+        LP.CameraMinZoomDistance = 0.5
+        LP.CameraMaxZoomDistance = 0.5
+    end)
+    pcall(function() Gui:Destroy() end)
+    G.VenicePD_Unload = nil
+end
+
+notify("venice v5 · " .. C.MenuKey.Name .. " — меню")
